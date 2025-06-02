@@ -60,13 +60,24 @@ function cosineSimilarity(text1, text2) {
 
   return magnitude1 && magnitude2 ? dotProduct / (magnitude1 * magnitude2) : 0;
 }
-
 app.post('/auto-grade', async (req, res) => {
   try {
     const { subject, question } = req.query;
+
     const assignments = await StudentAssignment.find({ question, subject, evaluated: false });
     const assignmentLength = assignments.length;
     let count = 0;
+
+    // Grade calculator
+    function calculateFinalGrade(score) {
+      if (score >= 90) return 'A+';
+      if (score >= 80) return 'A';
+      if (score >= 70) return 'B+';
+      if (score >= 60) return 'B';
+      if (score >= 50) return 'C';
+      if (score >= 40) return 'D';
+      return 'F';
+    }
 
     for (let assignment of assignments) {
       const codeContent = fs.readFileSync(assignment.filePath, 'utf8');
@@ -75,10 +86,14 @@ app.post('/auto-grade', async (req, res) => {
       const referenceDoc = await TeacherSolution.findOne({ question: questionText, live: true });
 
       let plagiarismScore = 0;
+      let plagiarismComponent = 0;
+
       if (referenceDoc?.code) {
-        plagiarismScore = cosineSimilarity(codeContent, referenceDoc.code);
+        plagiarismScore = cosineSimilarity(codeContent, referenceDoc.code); // value: 0.0 to 1.0
+        plagiarismComponent = Math.round(plagiarismScore * 15); // Max 15 marks
       }
 
+      // LLM grading prompt
       const evalResponse = await axios.post(
         'https://api.groq.com/openai/v1/chat/completions',
         {
@@ -86,18 +101,19 @@ app.post('/auto-grade', async (req, res) => {
           messages: [
             {
               role: 'system',
-              content: `You are a strict and precise programming assignment evaluator. Use the following rubric to score the code:
-
+              content: `You are a programming assignment evaluator. Score the code out of 85 points using this rubric:
 - Correctness (50 pts)
 - Logic (20 pts)
 - Code Quality (15 pts)
 - Error Handling (15 pts)
 
-Return a score out of 100, a letter grade, and concise feedback. Be strict — do not reward incorrect or incomplete code.`
+Return ONLY:
+**Score (out of 85):**
+**Feedback:**`
             },
             {
               role: 'user',
-              content: `### Assignment Question:\n${questionText}\n\n### Student's Code:\n${codeContent}\n\nEvaluate the code and return:\n\n**Final Score:**  \n**Grade:**  \n**Feedback:**`
+              content: `Question:\n${questionText}\n\nStudent Code:\n${codeContent}`
             }
           ],
           temperature: 0.7
@@ -110,48 +126,26 @@ Return a score out of 100, a letter grade, and concise feedback. Be strict — d
         }
       );
 
-      const evalText = evalResponse.data.choices?.[0]?.message?.content || 'No evaluation available';
+      const evalText = evalResponse.data.choices?.[0]?.message?.content || 'No feedback generated';
 
-      let score = 0;
-      let grade = 'F';
-      let feedback = '';
-
-      const scoreMatch = evalText.match(/Final Score:\s*(\d+)/i);
-      const gradeMatch = evalText.match(/Grade:\s*([ABCDF])/i);
-
-      if (scoreMatch && gradeMatch) {
-        score = parseInt(scoreMatch[1]);
-        grade = gradeMatch[1];
-        feedback = evalText;
-      } else {
-        if (evalText.toLowerCase().includes('correct') || evalText.toLowerCase().includes('valid')) {
-          if (plagiarismScore < 0.5) {
-            score = 90;
-            grade = 'A';
-            feedback = '✅ Code logic is correct and plagiarism is low.';
-          } else if (plagiarismScore < 0.8) {
-            score = 75;
-            grade = 'B';
-            feedback = '⚠️ Code logic is correct, but moderate plagiarism detected.';
-          } else {
-            score = 60;
-            grade = 'C';
-            feedback = '❗ Code logic is correct, but high plagiarism detected.';
-          }
-        } else {
-          score = 40;
-          grade = 'D';
-          if (plagiarismScore > 0.7) {
-            feedback = '❌ Code logic is incorrect and heavily plagiarized.';
-          } else {
-            feedback = '❌ Code logic is incorrect.';
-          }
-        }
-        feedback += `\n\n📜 LLM Evaluation: ${evalText}`;
+      // Extract numeric LLM score
+      let llmScore = 0;
+const match = evalText.match(/\*\*Score\s*\(out of 85\):\*\*\s*(\d+)/i) ||
+              evalText.match(/Score\s*\(out of 85\):\s*(\d+)/i);
+      if (match) {
+        llmScore = parseInt(match[1]);
       }
 
-      assignment.score = score;
-      assignment.grade = grade;
+      // Final calculations
+      const finalScore = llmScore + plagiarismComponent;
+      const finalGrade = calculateFinalGrade(finalScore);
+
+      // Format full feedback message
+      const feedback = `📘 Code Evaluation Feedback:\n${evalText}\n\n📚 Plagiarism Score: ${(plagiarismScore * 100).toFixed(1)}% → ${plagiarismComponent}/15\n\n🧮 Final Score (LLM + Plagiarism): ${finalScore}/100\n\n🎓 Final Grade: ${finalGrade}`;
+
+      // Save in MongoDB
+      assignment.score = finalScore;
+      assignment.grade = finalGrade;
       assignment.feedback = feedback;
       assignment.evaluated = true;
       await assignment.save();
@@ -163,11 +157,11 @@ Return a score out of 100, a letter grade, and concise feedback. Be strict — d
       }
     }
 
-    console.log('✅ Auto grading completed successfully');
-    res.json({ message: 'Auto grading completed successfully ✅' });
+    console.log('✅ Auto grading completed');
+    res.json({ message: 'Auto grading completed ✅' });
 
   } catch (error) {
-    console.error('❌ Error during auto grading:', error.response?.data || error.message);
+    console.error('❌ Error in auto grading:', error.response?.data || error.message);
     res.status(500).json({ error: 'Auto grading failed' });
   }
 });

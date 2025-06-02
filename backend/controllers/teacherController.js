@@ -56,8 +56,12 @@ exports.getAssignmentsForTeacher = async (req, res) => {
     const studentRes = await axios.get(`http://localhost:5000/Sclass/Students/${classId}`);
     const students = studentRes.data; // ✅ FIXED: data is the array itself
 
+    console.log('Fetched students:', students);
+
     // 2. Get assignment submissions for this question
-    const submissions = await StudentAssignment.find({ question });
+    const submissions = await StudentAssignment.find({question});
+
+    console.log('Fetched submissions:', submissions);
 
     const submittedNames = new Set(submissions.map(s => s.name)); // assuming you're storing name
 
